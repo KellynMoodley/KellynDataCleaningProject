@@ -164,6 +164,14 @@ class SupabaseManager:
                         elapsed = time.time() - start_time
                         progress_pct = (completed_batches / total_batches) * 100
                         rate = total_inserted / elapsed if elapsed > 0 else 0
+                        
+                        # Prepare progress data
+                        progress_data = {
+                            'total_inserted': total_inserted,
+                            'total_rows': total_rows,
+                            }
+                        
+                        
                         logger.info(
                             f"Progress: {completed_batches}/{total_batches} batches ({progress_pct:.1f}%) | "
                             f"{total_inserted:,}/{total_rows:,} rows | "
@@ -219,8 +227,7 @@ class SupabaseManager:
             logger.error(f"Error retrieving original data: {str(e)}")
             return []
     
-    def get_all_original_data(self, table_name: str, sheet_identifier: str, 
-                             batch_size: int = 10000) -> List[Dict[str, Any]]:
+    def get_all_original_data(self, project_name, identifier):
         """
         Retrieve ALL original data from Supabase
         
@@ -232,38 +239,32 @@ class SupabaseManager:
         Returns:
             List of all dictionaries containing the data
         """
-        safe_table_name = f"{table_name.lower().replace(' ', '_').replace('-', '_')}_{sheet_identifier}_original"
-        
-        try:
-            all_data = []
-            offset = 0
+        table_name = f"{project_name}_{identifier}_original"
+    
+        all_data = []
+        offset = 0
+        batch_size = 10000
             
-            while True:
-                response = self.client.table(safe_table_name)\
-                    .select("*")\
-                    .order('original_row_number')\
-                    .range(offset, offset + batch_size - 1)\
-                    .execute()
+        while True:
+            response = self.client.table(table_name)\
+                .select("*")\
+                .order('original_row_number', desc=False)\
+                .range(offset, offset + batch_size - 1)\
+                .execute()
                 
-                batch_data = response.data
+            if not response.data:
+                break
                 
-                if not batch_data:
-                    break
+            # Data is already in separate columns, extend directly
+            all_data.extend(response.data)
                 
-                # Data is already in separate columns, extend directly
-                all_data.extend(batch_data)
+            if len(response.data) < batch_size:
+                break
                 
-                if len(batch_data) < batch_size:
-                    break
-                
-                offset += batch_size
-            
-            logger.info(f"Retrieved {len(all_data):,} original rows from {safe_table_name}")
-            return all_data
+            offset += batch_size
+    
+        return all_data
         
-        except Exception as e:
-            logger.error(f"Error retrieving all original data: {str(e)}")
-            return []
     
     # =========================
     # BATCH INSERT HELPER
@@ -352,6 +353,7 @@ class SupabaseManager:
             CREATE TABLE IF NOT EXISTS {excluded_table} (
                 id BIGSERIAL PRIMARY KEY,
                 row_id UUID NOT NULL,
+                original_row_number INTEGER NOT NULL,
                 original_name TEXT,
                 original_birth_day TEXT,
                 original_birth_month TEXT,
@@ -562,7 +564,7 @@ class SupabaseManager:
         safe_table_name = f"{table_name.lower().replace(' ', '_').replace('-', '_')}_{sheet_identifier}_included"
         
         try:
-            query = self.client.table(safe_table_name).select("*").order('id')
+            query = self.client.table(safe_table_name).select("*").order('original_row_number')
             
             if offset:
                 query = query.range(offset, offset + limit - 1 if limit else 999999)
@@ -593,7 +595,7 @@ class SupabaseManager:
         safe_table_name = f"{table_name.lower().replace(' ', '_').replace('-', '_')}_{sheet_identifier}_excluded"
         
         try:
-            query = self.client.table(safe_table_name).select("*").order('id')
+            query = self.client.table(safe_table_name).select("*").order('original_row_number')
             
             if offset:
                 query = query.range(offset, offset + limit - 1 if limit else 999999)
@@ -629,7 +631,7 @@ class SupabaseManager:
             while True:
                 response = self.client.table(safe_table_name)\
                     .select("*")\
-                    .order('id')\
+                    .order('original_row_number')\
                     .range(offset, offset + batch_size - 1)\
                     .execute()
                 
@@ -674,7 +676,7 @@ class SupabaseManager:
             while True:
                 response = self.client.table(safe_table_name)\
                     .select("*")\
-                    .order('id')\
+                    .order('original_row_number')\
                     .range(offset, offset + batch_size - 1)\
                     .execute()
                 

@@ -168,8 +168,7 @@ def load_sheet(sheet_key):
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
-
-
+    
 @app.route('/api/get_original_data/<sheet_key>')
 def get_original_data(sheet_key):
     """Get original data with pagination"""

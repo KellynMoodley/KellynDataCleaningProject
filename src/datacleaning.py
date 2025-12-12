@@ -103,12 +103,14 @@ class DataCleaner:
         # Generate unique identifier
         row_id = str(uuid.uuid4())
         cleaned['row_id'] = row_id
+        # Preserve original row number
+        cleaned['original_row_number'] = row.get('original_row_number')
         
         # Extract original values
-        name = row.get('FirstName', '') or ''
-        birth_day = row.get('BirthDay', '') or ''
-        birth_month = row.get('BirthMonth', '') or ''
-        birth_year = row.get('BirthYear', '') or ''
+        name = row.get('firstname', '') or ''
+        birth_day = row.get('birthday', '') or ''
+        birth_month = row.get('birthmonth', '') or ''
+        birth_year = row.get('birthyear', '') or ''
         
         # Validate name
         name_valid, name_error = self.is_valid_name(str(name))
@@ -181,6 +183,7 @@ class DataCleaner:
                 # Only include valid fields for included data
                 included_row = {
                     'row_id': cleaned_row['row_id'],
+                    'original_row_number': cleaned_row['original_row_number'],
                     'name': cleaned_row['name'],
                     'birth_day': cleaned_row['birth_day'],
                     'birth_month': cleaned_row['birth_month'],
@@ -191,6 +194,7 @@ class DataCleaner:
                 # Create exclusion record with all reasons
                 excluded_row = {
                     'row_id': cleaned_row['row_id'],
+                    'original_row_number': cleaned_row['original_row_number'],
                     'original_name': cleaned_row['original_name'],
                     'original_birth_day': cleaned_row['original_birth_day'],
                     'original_birth_month': cleaned_row['original_birth_month'],
