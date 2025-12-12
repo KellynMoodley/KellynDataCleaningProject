@@ -149,7 +149,7 @@ class ReportGenerator:
         story.append(Spacer(1, 0.2*inch))
         
         # Show first 100 records in PDF
-        display_data = data[:100] if len(data) > 100 else data
+        display_data = data
         
         if display_data:
             # Prepare table data with proper UUID display
@@ -184,7 +184,7 @@ class ReportGenerator:
             ]))
             story.append(data_table)
             
-            if len(data) > 100:
+            if False:
                 story.append(Spacer(1, 0.2*inch))
                 note = Paragraph(
                     f"<i>Note: Showing first 100 records of {len(data):,} total records. "
@@ -293,18 +293,16 @@ class ReportGenerator:
         story.append(Spacer(1, 0.2*inch))
         
         # Show first 100 records
-        display_data = data[:100] if len(data) > 100 else data
+        display_data = data
         
         if display_data:
             table_data = [['Row ID', 'Name', 'Day', 'Month', 'Year', 'Reason']]
             
-            for row in display_data:
-                # Truncate reason if too long for display
+            for row in display_data: 
                 reason = row.get('exclusion_reason', '')
-                if len(reason) > 40:
-                    reason = reason[:37] + '...'
+            
                 
-                row_id = str(row.get('row_id', ''))[:8]  # Show first 8 chars of UUID
+                row_id = str(row.get('row_id', ''))  # Show first 8 chars of UUID
                 
                 table_data.append([
                     row_id,
@@ -331,10 +329,10 @@ class ReportGenerator:
             ]))
             story.append(data_table)
             
-            if len(data) > 100:
+            if False:
                 story.append(Spacer(1, 0.2*inch))
                 note = Paragraph(
-                    f"<i>Note: Showing first 100 records of {len(data):,} total excluded records. "
+                    f"<i>Note: Showing {len(data):,} total excluded records. "
                     f"Download CSV for complete data.</i>",
                     self.styles['Normal']
                 )
