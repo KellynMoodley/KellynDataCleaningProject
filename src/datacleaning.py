@@ -7,9 +7,26 @@ import uuid
 import re
 from typing import List, Dict, Any, Tuple
 import logging
+import os
+from dotenv import load_dotenv
+import psycopg2
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+
+# Database configuration
+DB_CONFIG = {
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'host': os.getenv('DB_HOST'),
+    'port': os.getenv('DB_PORT', '5432'),
+    'dbname': os.getenv('DB_NAME', 'postgres'),
+    'sslmode': 'require'
+}
 
 
 class DataCleaner:
@@ -23,7 +40,7 @@ class DataCleaner:
     @staticmethod
     def is_valid_name(name: str) -> Tuple[bool, str]:
         """
-        Validate name field - only English letters and spaces allowed
+        Validate name field - allows letters, spaces, and Unicode characters (including emojis)
         
         Args:
             name: Name string to validate
@@ -36,7 +53,7 @@ class DataCleaner:
         
         name = name.strip()
         
-        if len(name) < 3:
+        if len(name) < 2:
             return False, "name too short"
         
         # Check for characters other than A-Z, a-z, and spaces
@@ -160,6 +177,7 @@ class DataCleaner:
         is_valid = len(errors) == 0
         return is_valid, cleaned, errors
     
+    
     def clean_dataset(self, data: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Clean entire dataset
@@ -208,14 +226,7 @@ class DataCleaner:
         logger.info(f"Cleaning complete: {len(self.included_data)} included, {len(self.excluded_data)} excluded")
         
         return self.included_data, self.excluded_data
-    
-    def get_included_data(self) -> List[Dict[str, Any]]:
-        """Get the cleaned/included data"""
-        return self.included_data
-    
-    def get_excluded_data(self) -> List[Dict[str, Any]]:
-        """Get the excluded data"""
-        return self.excluded_data
+
     
     def get_cleaning_summary(self) -> Dict[str, Any]:
         """

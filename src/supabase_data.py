@@ -13,9 +13,25 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import uuid
+import re
+from dotenv import load_dotenv
+import psycopg2
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+
+# Database configuration
+DB_CONFIG = {
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'host': os.getenv('DB_HOST'),
+    'port': os.getenv('DB_PORT', '5432'),
+    'dbname': os.getenv('DB_NAME', 'postgres'),
+    'sslmode': 'require'
+}
 
 
 class SupabaseManager:
@@ -775,6 +791,7 @@ class SupabaseManager:
         except Exception as e:
             logger.error(f"Error retrieving all excluded data: {str(e)}")
             return []
+        
     
     # =========================
     # NEW: PARALLEL FETCHING METHODS (MUCH FASTER!)
@@ -923,95 +940,7 @@ class SupabaseManager:
         except Exception as e:
             logger.error(f"Error retrieving data: {str(e)}")
             return []
-    
-    # =========================
-    # NEW: DATABASE-LEVEL ANALYTICS (LIGHTNING FAST!)
-    # =========================
-    
-    def get_analytics_from_database(self, table_name: str, sheet_identifier: str) -> Dict[str, Any]:
-        """
-        Calculate analytics directly in database (lightning fast!)
-        
-        Args:
-            table_name: Base table name
-            sheet_identifier: Sheet identifier
-        
-        Returns:
-            Dictionary containing analytics data
-        """
-        safe_table_name = table_name.lower().replace(' ', '_').replace('-', '_')
-        included_table = f"{safe_table_name}_{sheet_identifier}_included"
-        excluded_table = f"{safe_table_name}_{sheet_identifier}_excluded"
-        
-        try:
-            logger.info(f"Calculating analytics in database for {sheet_identifier}...")
-            start_time = time.time()
-            
-            # Get counts
-            included_count = self.count_records(table_name, sheet_identifier, 'included')
-            excluded_count = self.count_records(table_name, sheet_identifier, 'excluded')
-            total_count = included_count + excluded_count
-            
-            # Birth year distribution (SQL aggregation)
-            year_sql = f"""
-            SELECT birth_year as year, COUNT(*) as count 
-            FROM {included_table} 
-            GROUP BY birth_year 
-            ORDER BY birth_year DESC;
-            """
-            
-            year_response = self.client.rpc('execute_sql', {'query': year_sql}).execute()
-            birth_year_dist = year_response.data if hasattr(year_response, 'data') else []
-            
-            # Exclusion reasons (SQL aggregation)
-            exclusion_sql = f"""
-            SELECT exclusion_reason as reason, COUNT(*) as count 
-            FROM {excluded_table} 
-            GROUP BY exclusion_reason 
-            ORDER BY count DESC;
-            """
-            
-            exclusion_response = self.client.rpc('execute_sql', {'query': exclusion_sql}).execute()
-            exclusion_reasons = exclusion_response.data if hasattr(exclusion_response, 'data') else []
-            
-            # Unique counts (SQL aggregation)
-            unique_sql = f"""
-            SELECT 
-                COUNT(DISTINCT name) as unique_names,
-                COUNT(DISTINCT (birth_day, birth_month, birth_year)) as unique_birthdays,
-                COUNT(DISTINCT (name, birth_year)) as unique_name_year
-            FROM {included_table};
-            """
-            
-            unique_response = self.client.rpc('execute_sql', {'query': unique_sql}).execute()
-            unique_data = unique_response.data[0] if hasattr(unique_response, 'data') and unique_response.data else {}
-            
-            # Build analytics response
-            analytics = {
-                'dataset_sizes': {
-                    'original_row_count': total_count,
-                    'included_row_count': included_count,
-                    'excluded_row_count': excluded_count,
-                    'percent_included_vs_original': round((included_count / total_count * 100), 2) if total_count > 0 else 0,
-                    'percent_excluded_vs_original': round((excluded_count / total_count * 100), 2) if total_count > 0 else 0
-                },
-                'uniqueness_metrics': {
-                    'unique_names': unique_data.get('unique_names', 0),
-                    'unique_birthday_combinations': unique_data.get('unique_birthdays', 0),
-                    'unique_name_year': unique_data.get('unique_name_year', 0)
-                },
-                'birth_year_distribution': birth_year_dist,
-                'exclusion_reasons': exclusion_reasons
-            }
-            
-            elapsed = time.time() - start_time
-            logger.info(f"✓ Analytics calculated in {elapsed:.1f}s")
-            
-            return analytics
-            
-        except Exception as e:
-            logger.error(f"Error calculating analytics: {str(e)}")
-            return {}
+
     
     # =========================
     # UTILITY METHODS
@@ -1062,46 +991,77 @@ class SupabaseManager:
                     return 0
         
         return 0
-            
-            
-    def create_indexes(self, table_name: str, sheet_identifier: str) -> bool:
-        """
-        Create indexes after bulk insert is complete
     
-        Args:
-            table_name: Base table name
-            sheet_identifier: Sheet identifier
-    
-        Returns:
-            bool: True if successful
-        """
-        safe_table_name = table_name.lower().replace(' ', '_').replace('-', '_')
-    
-        original_table = f"{safe_table_name}_{sheet_identifier}_original"
-        included_table = f"{safe_table_name}_{sheet_identifier}_included"
-        excluded_table = f"{safe_table_name}_{sheet_identifier}_excluded"
-    
+    def count_included_records(self, table_name: str, sheet_identifier: str) -> int:
+        """Count included records using direct PostgreSQL query"""
+        connection = None
+        cursor = None
         try:
-            logger.info(f"Creating indexes for {sheet_identifier}...")
-        
-            # Original table indexes
-            index_sql = f"""
-            CREATE INDEX IF NOT EXISTS idx_{original_table}_row_id ON {original_table}(row_id);
-            CREATE INDEX IF NOT EXISTS idx_{original_table}_row_number ON {original_table}(original_row_number);
-        
-            CREATE INDEX IF NOT EXISTS idx_{included_table}_row_id ON {included_table}(row_id);
-            CREATE INDEX IF NOT EXISTS idx_{included_table}_name ON {included_table}(name);
-            CREATE INDEX IF NOT EXISTS idx_{included_table}_birth_year ON {included_table}(birth_year);
-        
-            CREATE INDEX IF NOT EXISTS idx_{excluded_table}_row_id ON {excluded_table}(row_id);
-            CREATE INDEX IF NOT EXISTS idx_{excluded_table}_exclusion_reason ON {excluded_table}(exclusion_reason);
-            """
-        
-            self.client.rpc('execute_sql', {'query': index_sql}).execute()
-            logger.info(f"✓ Indexes created for {sheet_identifier}")
-        
-            return True
-        
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
+            
+            cursor.execute(
+                f"SELECT COUNT(*) FROM {table_name} WHERE sheet_identifier = %s AND is_excluded = FALSE",
+                (sheet_identifier,)
+            )
+            count = cursor.fetchone()[0]
+            return count
+            
         except Exception as e:
-            logger.error(f"Error creating indexes: {str(e)}")
-            raise
+            logger.error(f"Error counting included records: {e}")
+            return 0
+        finally:
+            if cursor:
+                cursor.close()
+            if connection:
+                connection.close()
+
+    def count_excluded_records(self, table_name: str, sheet_identifier: str) -> int:
+        """Count excluded records using direct PostgreSQL query"""
+        connection = None
+        cursor = None
+        try:
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
+            
+            cursor.execute(
+                f"SELECT COUNT(*) FROM {table_name} WHERE sheet_identifier = %s AND is_excluded = TRUE",
+                (sheet_identifier,)
+            )
+            count = cursor.fetchone()[0]
+            return count
+            
+        except Exception as e:
+            logger.error(f"Error counting excluded records: {e}")
+            return 0
+        finally:
+            if cursor:
+                cursor.close()
+            if connection:
+                connection.close()
+
+    def count_total_records(self, table_name: str, sheet_identifier: str) -> int:
+        """Count total records using direct PostgreSQL query"""
+        connection = None
+        cursor = None
+        try:
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
+            
+            cursor.execute(
+                f"SELECT COUNT(*) FROM {table_name} WHERE sheet_identifier = %s",
+                (sheet_identifier,)
+            )
+            count = cursor.fetchone()[0]
+            return count
+            
+        except Exception as e:
+            logger.error(f"Error counting total records: {e}")
+            return 0
+        finally:
+            if cursor:
+                cursor.close()
+            if connection:
+                connection.close()
+        return 0
+            

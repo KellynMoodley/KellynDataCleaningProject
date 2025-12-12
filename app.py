@@ -11,7 +11,8 @@ import time
 import os
 import io
 import uuid
-from src import SupabaseManager, DataCleaner, ReportGenerator, AnalyticsEngine
+from src import SupabaseManager, DataCleaner, ReportGenerator, AnalyticsEngine, SupabaseManagerSQL
+import logging
 
 app = Flask(__name__)
 
@@ -21,6 +22,9 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 service = build("sheets", "v4", credentials=creds)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Sheet configurations
 SHEETS_CONFIG = {
@@ -282,8 +286,8 @@ def load_sheet(sheet_key):
         config = SHEETS_CONFIG[sheet_key]
         
         # Check if cleaned data exists
-        included_count = supabase_manager.count_records('clients_2025', config['identifier'], 'included')
-        excluded_count = supabase_manager.count_records('clients_2025', config['identifier'], 'excluded')
+        included_count = supabase_manager.count_included_records('clients_2025', config['identifier'], 'included')
+        excluded_count = supabase_manager.count_excluded_records('clients_2025', config['identifier'], 'excluded')
         
         if included_count > 0 or excluded_count > 0:
             return jsonify({
@@ -428,8 +432,8 @@ def check_cleaning_status(sheet_key):
         config = SHEETS_CONFIG[sheet_key]
         
         # Check counts ONLY
-        included_count = supabase_manager.count_records('clients_2025', config['identifier'], 'included')
-        excluded_count = supabase_manager.count_records('clients_2025', config['identifier'], 'excluded')
+        included_count = supabase_manager.count_included_records('clients_2025', config['identifier'], 'included')
+        excluded_count = supabase_manager.count_excluded_records('clients_2025', config['identifier'], 'excluded')
         original_count = included_count + excluded_count
         
         if included_count > 0 or excluded_count > 0:
@@ -469,22 +473,19 @@ def get_cleaned_data(sheet_key):
         if sheet_key not in SHEETS_CONFIG:
             return jsonify({'error': 'Invalid sheet'}), 404
         
-        init_supabase()
         config = SHEETS_CONFIG[sheet_key]
-        
         offset = (page - 1) * per_page
-        
+
         if data_type == 'included':
-            data = supabase_manager.get_included_data('clients_2025', config['identifier'], 
-                                                     limit=per_page, offset=offset)
-            total_count = supabase_manager.count_records('clients_2025', config['identifier'], 'included')
+            data = supabase_manager.get_records('clients_2025', config['identifier'], limit=per_page, offset=offset, excluded=False)
+
+            total_count = supabase_manager.count_included_records('clients_2025', config['identifier'])
         else:
-            data = supabase_manager.get_excluded_data('clients_2025', config['identifier'], 
-                                                     limit=per_page, offset=offset)
-            total_count = supabase_manager.count_records('clients_2025', config['identifier'], 'excluded')
-        
+            data = supabase_manager.get_records('clients_2025', config['identifier'], limit=per_page, offset=offset, excluded=True)
+            total_count = supabase_manager.count_excluded_records('clients_2025', config['identifier'])
+
         total_pages = (total_count + per_page - 1) // per_page
-        
+
         return jsonify({
             'success': True,
             'data': data,
@@ -494,9 +495,9 @@ def get_cleaned_data(sheet_key):
             'total_pages': total_pages,
             'type': data_type
         })
-    
+
     except Exception as e:
-        print(f"Error getting cleaned data: {str(e)}")
+        logger.error(f"Error getting cleaned data: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/check_original_in_supabase/<sheet_key>')
@@ -510,7 +511,7 @@ def check_original_in_supabase(sheet_key):
         config = SHEETS_CONFIG[sheet_key]
         
         # Check if original table has data
-        original_count = supabase_manager.count_records('clients_2025', config['identifier'], 'original')
+        original_count = supabase_manager.count_total_records('clients_2025', config['identifier'], 'original')
         
         return jsonify({
             'exists': original_count > 0,
@@ -548,7 +549,7 @@ def get_original_data_from_supabase(sheet_key):
         )
         
         # Get total count
-        total = supabase_manager.count_records('clients_2025', config['identifier'], 'original')
+        total = supabase_manager.count_total_records('clients_2025', config['identifier'], 'original')
         
         # Calculate total pages
         total_pages = (total + per_page - 1) // per_page
@@ -572,35 +573,35 @@ def get_original_data_from_supabase(sheet_key):
             'error': str(e)
         }), 500
 
+
 @app.route('/api/get_analytics/<sheet_key>')
 def get_analytics(sheet_key):
     try:
         init_supabase()
         config = SHEETS_CONFIG[sheet_key]
-        
+
         print(f"Generating analytics for {sheet_key}...")
         start_time = time.time()
-        
-        # Use PARALLEL fetching (10x faster!)
-        included_data = supabase_manager.get_all_included_data_parallel('clients_2025', config['identifier'])
-        excluded_data = supabase_manager.get_all_excluded_data_parallel('clients_2025', config['identifier'])
-        original_count = len(included_data) + len(excluded_data)
-        
-        # Generate analytics
-        analytics = AnalyticsEngine(included_data, excluded_data, original_count)
-        analytics_data = analytics.get_comprehensive_analytics()
-        
+
+        # Use the new SQL-based AnalyticsEngine
+        analytics_engine = AnalyticsEngine()
+        analytics_data = analytics_engine.get_comprehensive_analytics(
+            table_name='clients_2025',
+            sheet_identifier=config['identifier']
+        )
+
         elapsed = time.time() - start_time
         print(f"✓ Analytics generated in {elapsed:.1f}s")
-        
+
         return jsonify({
             'success': True,
             'analytics': analytics_data,
             'sheet_key': sheet_key
         })
-        
+
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
 
 # =========================
 # Download Routes
@@ -608,19 +609,20 @@ def get_analytics(sheet_key):
 
 @app.route('/api/download/included_csv/<sheet_key>')
 def download_included_csv(sheet_key):
-    """Download included data as CSV"""
+    """Download included data as CSV using direct PostgreSQL COPY"""
     try:
-        init_supabase()
         config = SHEETS_CONFIG[sheet_key]
-        
-        data = supabase_manager.get_all_included_data('clients_2025', config['identifier'])
         report_gen = ReportGenerator()
         
-        columns = ['row_id', 'name', 'birth_day', 'birth_month', 'birth_year']
-        csv_data = report_gen.generate_csv(data, columns)
+        # Use the fast COPY method
+        csv_data = report_gen.generate_csv_direct(
+            table_name='clients_2025',
+            sheet_identifier=config['identifier'],
+            is_excluded=False
+        )
         
         return send_file(
-            io.BytesIO(csv_data.encode('utf-8')),
+            io.BytesIO(csv_data.encode('utf-8-sig')),
             mimetype='text/csv',
             as_attachment=True,
             download_name=f'included_data_{sheet_key}.csv'
@@ -631,20 +633,20 @@ def download_included_csv(sheet_key):
 
 @app.route('/api/download/excluded_csv/<sheet_key>')
 def download_excluded_csv(sheet_key):
-    """Download excluded data as CSV"""
+    """Download excluded data as CSV using direct PostgreSQL COPY"""
     try:
-        init_supabase()
         config = SHEETS_CONFIG[sheet_key]
-        
-        data = supabase_manager.get_all_excluded_data('clients_2025', config['identifier'])
         report_gen = ReportGenerator()
         
-        columns = ['row_id', 'original_name', 'original_birth_day', 'original_birth_month', 
-                   'original_birth_year', 'exclusion_reason']
-        csv_data = report_gen.generate_csv(data, columns)
+        # Use the fast COPY method
+        csv_data = report_gen.generate_csv_direct(
+            table_name='clients_2025',
+            sheet_identifier=config['identifier'],
+            is_excluded=True
+        )
         
         return send_file(
-            io.BytesIO(csv_data.encode('utf-8')),
+            io.BytesIO(csv_data.encode('utf-8-sig')),
             mimetype='text/csv',
             as_attachment=True,
             download_name=f'excluded_data_{sheet_key}.csv'
@@ -657,19 +659,15 @@ def download_excluded_csv(sheet_key):
 def download_included_pdf(sheet_key):
     """Download included data report as PDF"""
     try:
-        init_supabase()
         config = SHEETS_CONFIG[sheet_key]
-        
-        data = supabase_manager.get_all_included_data('clients_2025', config['identifier'])
-        
-        # Get analytics
-        excluded_data = supabase_manager.get_all_excluded_data('clients_2025', config['identifier'])
-        original_count = len(data) + len(excluded_data)
-        analytics = AnalyticsEngine(data, excluded_data, original_count)
-        analytics_data = analytics.get_comprehensive_analytics()
-        
         report_gen = ReportGenerator()
-        pdf_bytes = report_gen.generate_included_pdf(data, analytics_data, config['display_name'])
+        
+        # Generate PDF directly from database
+        pdf_bytes = report_gen.generate_included_pdf_from_db(
+            table_name='clients_2025',
+            sheet_identifier=config['identifier'],
+            sheet_name=config['display_name']
+        )
         
         return send_file(
             io.BytesIO(pdf_bytes),
@@ -685,19 +683,15 @@ def download_included_pdf(sheet_key):
 def download_excluded_pdf(sheet_key):
     """Download excluded data report as PDF"""
     try:
-        init_supabase()
         config = SHEETS_CONFIG[sheet_key]
-        
-        data = supabase_manager.get_all_excluded_data('clients_2025', config['identifier'])
-        
-        # Get analytics
-        included_data = supabase_manager.get_all_included_data('clients_2025', config['identifier'])
-        original_count = len(included_data) + len(data)
-        analytics = AnalyticsEngine(included_data, data, original_count)
-        analytics_data = analytics.get_comprehensive_analytics()
-        
         report_gen = ReportGenerator()
-        pdf_bytes = report_gen.generate_excluded_pdf(data, analytics_data, config['display_name'])
+        
+        # Generate PDF directly from database
+        pdf_bytes = report_gen.generate_excluded_pdf_from_db(
+            table_name='clients_2025',
+            sheet_identifier=config['identifier'],
+            sheet_name=config['display_name']
+        )
         
         return send_file(
             io.BytesIO(pdf_bytes),
