@@ -2,7 +2,8 @@
 Supabase Data Manager
 Handles all database operations including table creation, data insertion, and retrieval.
 Optimized for large datasets with parallel batch uploads.
-ENHANCED VERSION - Includes original data storage with row_id tracking
+OPTIMIZED VERSION - Direct processing from Google Sheets with optional original storage
+ENHANCED - Added parallel fetching and database-level analytics
 """
 
 import os
@@ -38,7 +39,7 @@ class SupabaseManager:
         logger.info("Supabase client initialized successfully")
     
     # =========================
-    # ORIGINAL DATA METHODS
+    # ORIGINAL DATA METHODS (Optional - for audit trail)
     # =========================
     
     def create_original_table(self, table_name: str, sheet_identifier: str) -> bool:
@@ -67,6 +68,8 @@ class SupabaseManager:
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
             
+            CREATE INDEX IF NOT EXISTS idx_{original_table}_row_number 
+            ON {original_table}(original_row_number);
             """
     
             
@@ -85,11 +88,11 @@ class SupabaseManager:
         except Exception as e:
             logger.error(f"Error creating original table: {str(e)}")
             raise
-        
-    def insert_original_data(self, table_name: str, sheet_identifier: str, data: List[Dict[str, Any]], 
-                        batch_size: int = 5000, max_workers: int = 8) -> bool:
+    
+    def append_original_data(self, table_name: str, sheet_identifier: str, data: List[Dict[str, Any]], 
+                            batch_size: int = 5000, max_workers: int = 5) -> bool:
         """
-        Insert original data into Supabase with row_id generation
+        Append original data to Supabase (optional - for audit trail)
         
         Args:
             table_name: Base table name
@@ -104,43 +107,20 @@ class SupabaseManager:
         safe_table_name = f"{table_name.lower().replace(' ', '_').replace('-', '_')}_{sheet_identifier}_original"
         
         try:
-            # Clear existing data
-            logger.info(f"Clearing existing data from {safe_table_name}...")
-            self.client.table(safe_table_name).delete().neq('row_id', '00000000-0000-0000-0000-000000000000').execute()
-            
             if not data:
                 logger.warning("No data to insert")
                 return True
             
-            # Prepare data with row_id
-            prepared_data = []
-            for row in data:
-                row_id = str(uuid.uuid4())
-                original_row_number = row.get('original_row_number', 0)
-                
-                # Store all other fields in JSONB
-                data_dict = {k: v for k, v in row.items() if k != 'original_row_number'}
-                
-                prepared_data.append({
-                    'row_id': row_id,
-                    'original_row_number': original_row_number,
-                    'firstname': row.get('FirstName', ''),
-                    'birthday': row.get('BirthDay', ''),
-                    'birthmonth': row.get('BirthMonth', ''),
-                    'birthyear': row.get('BirthYear', '')
-                })
-            
-            total_rows = len(prepared_data)
-            logger.info(f"Starting parallel batch insert of {total_rows:,} rows (batch_size={batch_size}, workers={max_workers})...")
+            total_rows = len(data)
+            logger.info(f"Appending {total_rows:,} rows to {safe_table_name}...")
             
             # Create batches
             batches = []
             for i in range(0, total_rows, batch_size):
-                batch = prepared_data[i:i + batch_size]
+                batch = data[i:i + batch_size]
                 batches.append((i // batch_size, batch))
             
             total_batches = len(batches)
-            logger.info(f"Created {total_batches} batches")
             
             # Process batches in parallel
             total_inserted = 0
@@ -159,39 +139,14 @@ class SupabaseManager:
                     total_inserted += rows_inserted
                     total_failed += rows_failed
                     completed_batches += 1
-                    
-                    if completed_batches % 10 == 0 or completed_batches == total_batches:
-                        elapsed = time.time() - start_time
-                        progress_pct = (completed_batches / total_batches) * 100
-                        rate = total_inserted / elapsed if elapsed > 0 else 0
-                        
-                        # Prepare progress data
-                        progress_data = {
-                            'total_inserted': total_inserted,
-                            'total_rows': total_rows,
-                            }
-                        
-                        
-                        logger.info(
-                            f"Progress: {completed_batches}/{total_batches} batches ({progress_pct:.1f}%) | "
-                            f"{total_inserted:,}/{total_rows:,} rows | "
-                            f"Rate: {rate:.0f} rows/sec"
-                        )
             
             elapsed = time.time() - start_time
-            success_rate = (total_inserted / total_rows) * 100 if total_rows > 0 else 0
-            avg_rate = total_inserted / elapsed if elapsed > 0 else 0
-            
-            logger.info(
-                f"✓ Insert complete: {total_inserted:,}/{total_rows:,} rows ({success_rate:.2f}%) | "
-                f"Time: {elapsed:.1f}s | "
-                f"Avg rate: {avg_rate:.0f} rows/sec"
-            )
+            logger.info(f"✓ Appended {total_inserted:,} rows in {elapsed:.1f}s")
             
             return True
         
         except Exception as e:
-            logger.error(f"Error inserting original data: {str(e)}")
+            logger.error(f"Error appending original data: {str(e)}")
             raise
     
     def get_original_data(self, table_name: str, sheet_identifier: str, 
@@ -232,9 +187,8 @@ class SupabaseManager:
         Retrieve ALL original data from Supabase
         
         Args:
-            table_name: Base table name
-            sheet_identifier: Sheet identifier
-            batch_size: Number of rows to fetch per batch
+            project_name: Base project name
+            identifier: Sheet identifier
         
         Returns:
             List of all dictionaries containing the data
@@ -243,7 +197,7 @@ class SupabaseManager:
     
         all_data = []
         offset = 0
-        batch_size = 10000
+        batch_size = 1000  # Supabase pagination limit
             
         while True:
             response = self.client.table(table_name)\
@@ -264,7 +218,6 @@ class SupabaseManager:
             offset += batch_size
     
         return all_data
-        
     
     # =========================
     # BATCH INSERT HELPER
@@ -346,6 +299,8 @@ class SupabaseManager:
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
             
+            CREATE INDEX IF NOT EXISTS idx_{included_table}_row_number 
+            ON {included_table}(original_row_number);
             """
             
             # Create excluded data table
@@ -362,6 +317,8 @@ class SupabaseManager:
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
             
+            CREATE INDEX IF NOT EXISTS idx_{excluded_table}_row_number 
+            ON {excluded_table}(original_row_number);
             """
             
             self.client.rpc('execute_sql', {'query': included_sql}).execute()
@@ -383,10 +340,130 @@ class SupabaseManager:
             logger.error(f"Error creating tables: {str(e)}")
             raise
     
+    def append_included_data(self, table_name: str, sheet_identifier: str, data: List[Dict[str, Any]], 
+                            batch_size: int = 5000, max_workers: int = 5) -> bool:
+        """
+        Append included data to Supabase (does not clear existing data)
+        
+        Args:
+            table_name: Base table name
+            sheet_identifier: Sheet identifier
+            data: List of dictionaries containing the cleaned data
+            batch_size: Number of rows per batch
+            max_workers: Number of parallel workers
+        
+        Returns:
+            bool: True if successful
+        """
+        safe_table_name = f"{table_name.lower().replace(' ', '_').replace('-', '_')}_{sheet_identifier}_included"
+        
+        try:
+            if not data:
+                logger.warning("No data to insert")
+                return True
+            
+            total_rows = len(data)
+            logger.info(f"Appending {total_rows:,} rows to {safe_table_name}...")
+            
+            # Create batches
+            batches = []
+            for i in range(0, total_rows, batch_size):
+                batch = data[i:i + batch_size]
+                batches.append((i // batch_size, batch))
+            
+            total_batches = len(batches)
+            
+            # Process batches in parallel
+            total_inserted = 0
+            total_failed = 0
+            completed_batches = 0
+            start_time = time.time()
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_batch = {
+                    executor.submit(self._insert_batch, safe_table_name, batch, batch_num): batch_num
+                    for batch_num, batch in batches
+                }
+                
+                for future in as_completed(future_to_batch):
+                    batch_num, rows_inserted, rows_failed = future.result()
+                    total_inserted += rows_inserted
+                    total_failed += rows_failed
+                    completed_batches += 1
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✓ Appended {total_inserted:,} rows in {elapsed:.1f}s")
+            
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error appending included data: {str(e)}")
+            raise
+    
+    def append_excluded_data(self, table_name: str, sheet_identifier: str, data: List[Dict[str, Any]],
+                            batch_size: int = 5000, max_workers: int = 5) -> bool:
+        """
+        Append excluded data to Supabase (does not clear existing data)
+        
+        Args:
+            table_name: Base table name
+            sheet_identifier: Sheet identifier
+            data: List of dictionaries containing the excluded data
+            batch_size: Number of rows per batch
+            max_workers: Number of parallel workers
+        
+        Returns:
+            bool: True if successful
+        """
+        safe_table_name = f"{table_name.lower().replace(' ', '_').replace('-', '_')}_{sheet_identifier}_excluded"
+        
+        try:
+            if not data:
+                logger.warning("No data to insert")
+                return True
+            
+            total_rows = len(data)
+            logger.info(f"Appending {total_rows:,} rows to {safe_table_name}...")
+            
+            # Create batches
+            batches = []
+            for i in range(0, total_rows, batch_size):
+                batch = data[i:i + batch_size]
+                batches.append((i // batch_size, batch))
+            
+            total_batches = len(batches)
+            
+            # Process batches in parallel
+            total_inserted = 0
+            total_failed = 0
+            completed_batches = 0
+            start_time = time.time()
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_batch = {
+                    executor.submit(self._insert_batch, safe_table_name, batch, batch_num): batch_num
+                    for batch_num, batch in batches
+                }
+                
+                for future in as_completed(future_to_batch):
+                    batch_num, rows_inserted, rows_failed = future.result()
+                    total_inserted += rows_inserted
+                    total_failed += rows_failed
+                    completed_batches += 1
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✓ Appended {total_inserted:,} rows in {elapsed:.1f}s")
+            
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error appending excluded data: {str(e)}")
+            raise
+    
     def insert_included_data(self, table_name: str, sheet_identifier: str, data: List[Dict[str, Any]], 
                             batch_size: int = 10000, max_workers: int = 5) -> bool:
         """
-        Insert cleaned/included data into Supabase with parallel batch processing
+        Insert cleaned/included data into Supabase with parallel batch processing (clears existing)
         
         Args:
             table_name: Base table name
@@ -468,7 +545,7 @@ class SupabaseManager:
     def insert_excluded_data(self, table_name: str, sheet_identifier: str, data: List[Dict[str, Any]],
                             batch_size: int = 10000, max_workers: int = 5) -> bool:
         """
-        Insert excluded data into Supabase with parallel batch processing
+        Insert excluded data into Supabase with parallel batch processing (clears existing)
         
         Args:
             table_name: Base table name
@@ -610,7 +687,7 @@ class SupabaseManager:
             return []
     
     def get_all_included_data(self, table_name: str, sheet_identifier: str, 
-                             batch_size: int = 10000) -> List[Dict[str, Any]]:
+                             batch_size: int = 1000) -> List[Dict[str, Any]]:
         """
         Retrieve ALL included data from Supabase using pagination
         
@@ -655,7 +732,7 @@ class SupabaseManager:
             return []
     
     def get_all_excluded_data(self, table_name: str, sheet_identifier: str,
-                             batch_size: int = 10000) -> List[Dict[str, Any]]:
+                             batch_size: int = 1000) -> List[Dict[str, Any]]:
         """
         Retrieve ALL excluded data from Supabase using pagination
         
@@ -698,11 +775,251 @@ class SupabaseManager:
         except Exception as e:
             logger.error(f"Error retrieving all excluded data: {str(e)}")
             return []
+    
+    # =========================
+    # NEW: PARALLEL FETCHING METHODS (MUCH FASTER!)
+    # =========================
+    
+    def get_all_included_data_parallel(self, table_name: str, sheet_identifier: str, 
+                                      batch_size: int = 1000, max_workers: int = 10) -> List[Dict[str, Any]]:
+        """
+        Retrieve ALL included data using PARALLEL fetching (much faster!)
         
+        Args:
+            table_name: Base table name
+            sheet_identifier: Sheet identifier
+            batch_size: Rows per batch (default 1000)
+            max_workers: Parallel workers (default 10)
+        
+        Returns:
+            List of all data
+        """
+        safe_table_name = f"{table_name.lower().replace(' ', '_').replace('-', '_')}_{sheet_identifier}_included"
+        
+        try:
+            # Step 1: Get total count
+            count_response = self.client.table(safe_table_name).select("*", count='exact').limit(1).execute()
+            total_count = count_response.count or 0
+            
+            if total_count == 0:
+                return []
+            
+            logger.info(f"Fetching {total_count:,} included rows in parallel...")
+            
+            # Step 2: Calculate batches
+            num_batches = (total_count + batch_size - 1) // batch_size
+            
+            # Step 3: Fetch in parallel
+            def fetch_batch(batch_num):
+                offset = batch_num * batch_size
+                try:
+                    client = create_client(self.url, self.key)
+                    response = client.table(safe_table_name)\
+                        .select("*")\
+                        .order('original_row_number')\
+                        .range(offset, offset + batch_size - 1)\
+                        .execute()
+                    return (batch_num, response.data)
+                except Exception as e:
+                    logger.error(f"Error fetching batch {batch_num}: {str(e)}")
+                    return (batch_num, [])
+            
+            start_time = time.time()
+            all_data = [None] * num_batches
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_batch = {executor.submit(fetch_batch, i): i for i in range(num_batches)}
+                
+                completed = 0
+                for future in as_completed(future_to_batch):
+                    batch_num, batch_data = future.result()
+                    all_data[batch_num] = batch_data
+                    completed += 1
+                    
+                    if completed % 100 == 0:
+                        logger.info(f"Progress: {completed}/{num_batches} batches")
+            
+            # Flatten
+            flattened = []
+            for batch in all_data:
+                if batch:
+                    flattened.extend(batch)
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✓ Fetched {len(flattened):,} rows in {elapsed:.1f}s ({len(flattened)/elapsed:.0f} rows/sec)")
+            
+            return flattened
+        
+        except Exception as e:
+            logger.error(f"Error retrieving data: {str(e)}")
+            return []
+    
+    def get_all_excluded_data_parallel(self, table_name: str, sheet_identifier: str,
+                                      batch_size: int = 1000, max_workers: int = 10) -> List[Dict[str, Any]]:
+        """
+        Retrieve ALL excluded data using PARALLEL fetching (much faster!)
+        
+        Args:
+            table_name: Base table name
+            sheet_identifier: Sheet identifier
+            batch_size: Rows per batch (default 1000)
+            max_workers: Parallel workers (default 10)
+        
+        Returns:
+            List of all data
+        """
+        safe_table_name = f"{table_name.lower().replace(' ', '_').replace('-', '_')}_{sheet_identifier}_excluded"
+        
+        try:
+            count_response = self.client.table(safe_table_name).select("*", count='exact').limit(1).execute()
+            total_count = count_response.count or 0
+            
+            if total_count == 0:
+                return []
+            
+            logger.info(f"Fetching {total_count:,} excluded rows in parallel...")
+            
+            num_batches = (total_count + batch_size - 1) // batch_size
+            
+            def fetch_batch(batch_num):
+                offset = batch_num * batch_size
+                try:
+                    client = create_client(self.url, self.key)
+                    response = client.table(safe_table_name)\
+                        .select("*")\
+                        .order('original_row_number')\
+                        .range(offset, offset + batch_size - 1)\
+                        .execute()
+                    return (batch_num, response.data)
+                except Exception as e:
+                    logger.error(f"Error fetching batch {batch_num}: {str(e)}")
+                    return (batch_num, [])
+            
+            start_time = time.time()
+            all_data = [None] * num_batches
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_batch = {executor.submit(fetch_batch, i): i for i in range(num_batches)}
+                
+                completed = 0
+                for future in as_completed(future_to_batch):
+                    batch_num, batch_data = future.result()
+                    all_data[batch_num] = batch_data
+                    completed += 1
+                    
+                    if completed % 100 == 0:
+                        logger.info(f"Progress: {completed}/{num_batches} batches")
+            
+            flattened = []
+            for batch in all_data:
+                if batch:
+                    flattened.extend(batch)
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✓ Fetched {len(flattened):,} rows in {elapsed:.1f}s ({len(flattened)/elapsed:.0f} rows/sec)")
+            
+            return flattened
+        
+        except Exception as e:
+            logger.error(f"Error retrieving data: {str(e)}")
+            return []
+    
+    # =========================
+    # NEW: DATABASE-LEVEL ANALYTICS (LIGHTNING FAST!)
+    # =========================
+    
+    def get_analytics_from_database(self, table_name: str, sheet_identifier: str) -> Dict[str, Any]:
+        """
+        Calculate analytics directly in database (lightning fast!)
+        
+        Args:
+            table_name: Base table name
+            sheet_identifier: Sheet identifier
+        
+        Returns:
+            Dictionary containing analytics data
+        """
+        safe_table_name = table_name.lower().replace(' ', '_').replace('-', '_')
+        included_table = f"{safe_table_name}_{sheet_identifier}_included"
+        excluded_table = f"{safe_table_name}_{sheet_identifier}_excluded"
+        
+        try:
+            logger.info(f"Calculating analytics in database for {sheet_identifier}...")
+            start_time = time.time()
+            
+            # Get counts
+            included_count = self.count_records(table_name, sheet_identifier, 'included')
+            excluded_count = self.count_records(table_name, sheet_identifier, 'excluded')
+            total_count = included_count + excluded_count
+            
+            # Birth year distribution (SQL aggregation)
+            year_sql = f"""
+            SELECT birth_year as year, COUNT(*) as count 
+            FROM {included_table} 
+            GROUP BY birth_year 
+            ORDER BY birth_year DESC;
+            """
+            
+            year_response = self.client.rpc('execute_sql', {'query': year_sql}).execute()
+            birth_year_dist = year_response.data if hasattr(year_response, 'data') else []
+            
+            # Exclusion reasons (SQL aggregation)
+            exclusion_sql = f"""
+            SELECT exclusion_reason as reason, COUNT(*) as count 
+            FROM {excluded_table} 
+            GROUP BY exclusion_reason 
+            ORDER BY count DESC;
+            """
+            
+            exclusion_response = self.client.rpc('execute_sql', {'query': exclusion_sql}).execute()
+            exclusion_reasons = exclusion_response.data if hasattr(exclusion_response, 'data') else []
+            
+            # Unique counts (SQL aggregation)
+            unique_sql = f"""
+            SELECT 
+                COUNT(DISTINCT name) as unique_names,
+                COUNT(DISTINCT (birth_day, birth_month, birth_year)) as unique_birthdays,
+                COUNT(DISTINCT (name, birth_year)) as unique_name_year
+            FROM {included_table};
+            """
+            
+            unique_response = self.client.rpc('execute_sql', {'query': unique_sql}).execute()
+            unique_data = unique_response.data[0] if hasattr(unique_response, 'data') and unique_response.data else {}
+            
+            # Build analytics response
+            analytics = {
+                'dataset_sizes': {
+                    'original_row_count': total_count,
+                    'included_row_count': included_count,
+                    'excluded_row_count': excluded_count,
+                    'percent_included_vs_original': round((included_count / total_count * 100), 2) if total_count > 0 else 0,
+                    'percent_excluded_vs_original': round((excluded_count / total_count * 100), 2) if total_count > 0 else 0
+                },
+                'uniqueness_metrics': {
+                    'unique_names': unique_data.get('unique_names', 0),
+                    'unique_birthday_combinations': unique_data.get('unique_birthdays', 0),
+                    'unique_name_year': unique_data.get('unique_name_year', 0)
+                },
+                'birth_year_distribution': birth_year_dist,
+                'exclusion_reasons': exclusion_reasons
+            }
+            
+            elapsed = time.time() - start_time
+            logger.info(f"✓ Analytics calculated in {elapsed:.1f}s")
+            
+            return analytics
+            
+        except Exception as e:
+            logger.error(f"Error calculating analytics: {str(e)}")
+            return {}
+    
+    # =========================
+    # UTILITY METHODS
+    # =========================
     
     def count_records(self, table_name: str, sheet_identifier: str, table_type: str = 'included') -> int:
         """
-        Count records in a table
+        Count records in a table with retry logic
         
         Args:
             table_name: Base table name
@@ -714,19 +1031,37 @@ class SupabaseManager:
         """
         safe_table_name = f"{table_name.lower().replace(' ', '_').replace('-', '_')}_{sheet_identifier}_{table_type}"
         
-        try:
-            response = self.client.table(safe_table_name).select("*", count='exact').execute()
-            return response.count or 0
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Create fresh client for each attempt
+                client = create_client(self.url, self.key)
+                response = client.table(safe_table_name).select("*", count='exact').execute()
+                return response.count or 0
+            
+            except Exception as e:
+                error_str = str(e)
+                
+                # If table doesn't exist, return 0 immediately
+                if 'PGRST205' in error_str or 'not find the table' in error_str or '404' in error_str:
+                    logger.debug(f"Table {safe_table_name} does not exist yet")
+                    return 0
+                
+                # If connection error, retry
+                if 'WinError 10054' in error_str or 'connection' in error_str.lower():
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 2
+                        logger.warning(f"Connection error counting {safe_table_name}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"Failed to count records after {max_retries} attempts: {error_str}")
+                        return 0
+                else:
+                    logger.error(f"Error counting records in {safe_table_name}: {error_str}")
+                    return 0
         
-        except Exception as e:
-            error_str = str(e)
-            # If table doesn't exist (PGRST205), return 0 instead of logging error
-            if 'PGRST205' in error_str or 'not find the table' in error_str:
-                logger.debug(f"Table {safe_table_name} does not exist yet")
-                return 0
-            else:
-                logger.error(f"Error counting records in {safe_table_name}: {str(e)}")
-                return 0
+        return 0
             
             
     def create_indexes(self, table_name: str, sheet_identifier: str) -> bool:

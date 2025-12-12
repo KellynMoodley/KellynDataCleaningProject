@@ -141,6 +141,7 @@ function checkSheetStatus(sheetKey) {
 function loadSheet(sheetKey) {
     const loadBtn = document.getElementById(`${sheetKey}-load-btn`);
     const statusBadge = document.getElementById(`${sheetKey}-status`);
+    const originalTab = document.getElementById(`${sheetKey}-original-tab`);
     
     loadBtn.disabled = true;
     loadBtn.textContent = '⏳ Loading...';
@@ -159,6 +160,9 @@ function loadSheet(sheetKey) {
                 loadBtn.textContent = '✓ Data Loaded';
                 loadBtn.classList.add('success');
                 
+                // Update original tab with count
+                originalTab.innerHTML = `Original Data <span style="background: rgba(255,255,255,0.3); padding: 2px 8px; border-radius: 10px; margin-left: 5px;">${data.row_count.toLocaleString()}</span>`;
+                
                 // Enable clean button
                 const cleanBtn = document.getElementById(`${sheetKey}-clean-btn`);
                 cleanBtn.disabled = false;
@@ -166,7 +170,6 @@ function loadSheet(sheetKey) {
                 // Load original data to display
                 loadOriginalData(sheetKey, 1);
                 
-                alert(`Successfully loaded ${data.row_count.toLocaleString()} rows!`);
             } else {
                 throw new Error(data.error || 'Failed to load sheet');
             }
@@ -252,33 +255,75 @@ function switchDataView(sheetKey, viewType, clickedTab) {
     // Update views
     container.querySelectorAll('.data-view').forEach(view => view.classList.remove('active'));
     document.getElementById(`${sheetKey}-${viewType}`).classList.add('active');
+    
+    // Load analytics if switching to analytics view
+    if (viewType === 'analytics') {
+        const analyticsContent = document.getElementById(`${sheetKey}-analytics-content`);
+        if (!analyticsContent.innerHTML || analyticsContent.innerHTML.trim() === '') {
+            analyticsContent.innerHTML = '<div class="loading-overlay active"><div class="spinner"></div><p>Loading analytics...</p></div>';
+            loadAnalytics(sheetKey);
+        }
+    }
 }
-
 // ==================== DATA LOADING ====================
 
 function loadOriginalData(sheetKey, page) {
-    const contentDiv = document.getElementById(`${sheetKey}-original`);
-    contentDiv.innerHTML = '<div class="loading-overlay active"><div class="spinner"></div></div>';
+    const container = document.getElementById(`${sheetKey}-original`);
+    const state = appState[sheetKey];
     
-    fetch(`/api/get_original_data/${sheetKey}?page=${page}&per_page=100`)
+    // Show loading
+    container.innerHTML = '<div class="loading-overlay active"><div class="spinner"></div><p>Loading original data...</p></div>';
+    
+    const perPage = 100;
+    
+    // First, check if original data exists in Supabase
+    fetch(`/api/check_original_in_supabase/${sheetKey}`)
         .then(res => res.json())
-        .then(data => {
-            if (data.success) {
-                appState[sheetKey].currentPage.original = page;
-                appState[sheetKey].totalPages.original = data.total_pages;
-                appState[sheetKey].totalRecords.original = data.total_records;
-
-
-                const columns = ['original_row_number', 'row_id', 'firstname', 'birthday', 'birthmonth', 'birthyear'];
-
-
-                renderTable(contentDiv, data.data, columns, 
-                           sheetKey, 'original', page, data.total_pages, data.total_records);
+        .then(checkData => {
+            if (checkData.exists) {
+                // Load from Supabase (stored original data)
+                console.log(`Loading original data from Supabase for ${sheetKey}`);
+                
+                fetch(`/api/get_original_data_from_supabase/${sheetKey}?page=${page}&per_page=${perPage}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            state.totalRecords.original = data.total;
+                            const totalPages = Math.ceil(data.total / perPage);
+                            const columns = ['original_row_number', 'firstname', 'birthday', 'birthmonth', 'birthyear'];
+                            renderTable(container, data.data, columns, sheetKey, 'original', page, totalPages, data.total);
+                        } else {
+                            container.innerHTML = '<p style="padding: 20px; color: #dc3545;">Error loading original data</p>';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error loading original data from Supabase:', error);
+                        container.innerHTML = '<p style="padding: 20px; color: #dc3545;">Error loading original data</p>';
+                    });
+            } else {
+                // Load from Google Sheets (no stored original)
+                console.log(`Loading original data from Google Sheets for ${sheetKey}`);
+                
+                fetch(`/api/get_original_data/${sheetKey}?page=${page}&per_page=${perPage}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            state.totalRecords.original = data.total_records;
+                            const columns = ['original_row_number', 'firstname', 'birthday', 'birthmonth', 'birthyear'];
+                            renderTable(container, data.data, columns, sheetKey, 'original', page, data.total_pages, data.total_records);
+                        } else {
+                            container.innerHTML = '<p style="padding: 20px; color: #dc3545;">Error loading original data</p>';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error loading original data from Google Sheets:', error);
+                        container.innerHTML = '<p style="padding: 20px; color: #dc3545;">Error loading original data</p>';
+                    });
             }
         })
         .catch(error => {
-            console.error('Error loading original data:', error);
-            contentDiv.innerHTML = '<p style="padding: 20px; text-align: center; color: #dc3545;">Error loading data</p>';
+            console.error('Error checking original data source:', error);
+            container.innerHTML = '<p style="padding: 20px; color: #dc3545;">Error checking data source</p>';
         });
 }
 
@@ -330,97 +375,140 @@ function renderTable(container, data, columns, sheetKey, tableType, currentPage,
         return;
     }
     
-    // Column display name mapping
-    const columnDisplayNames = {
-        'row_id': 'Row ID',
-        'original_row_number': 'Row Number',
-        'firstname': 'First Name',
-        'birthday': 'Birth Day',
-        'birthmonth': 'Birth Month',
-        'birthyear': 'Birth Year',
-        'name': 'Name',
-        'birth_day': 'Birth Day',
-        'birth_month': 'Birth Month',
-        'birth_year': 'Birth Year',
-        'original_name': 'Original Name',
-        'original_birth_day': 'Original Birth Day',
-        'original_birth_month': 'Original Birth Month',
-        'original_birth_year': 'Original Birth Year',
-        'exclusion_reason': 'Exclusion Reason'
-    };
+    let tableHTML = `
+        <div class="table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+    `;
     
-    let html = '<div class="table-wrapper"><table><thead><tr>';
-    columns.forEach(col => {
-        const displayName = columnDisplayNames[col] || col.replace(/_/g, ' ').toUpperCase();
-        html += `<th>${displayName}</th>`;
-    });
-    html += '</tr></thead><tbody>';
-    
-    data.forEach(row => {
-        html += '<tr>';
-        columns.forEach(col => {
-            let value = row[col];
-            if (col === 'row_id') {
-                html += `<td style="font-family: monospace; font-size: 0.85em;">${value || '-'}</td>`;
-            } else{
-            html += `<td>${value || '-'}</td>`;
-            }
-        });
-        html += '</tr>';
-    });
-    
-    html += '</tbody></table>';
-    
-    // Add pagination
-    if (totalPages > 1) {
-        html += '<div class="pagination">';
-        html += `<span class="pagination-info">Page ${currentPage} of ${totalPages} (${totalRecords.toLocaleString()} total rows)</span>`;
-        html += '<div class="pagination-controls">';
-        
-        // Previous
-        if (currentPage > 1) {
-            html += `<button onclick="loadPageData('${sheetKey}', '${tableType}', ${currentPage - 1})">‹ Previous</button>`;
-        } else {
-            html += `<button disabled>‹ Previous</button>`;
-        }
-        
-        // Page numbers
-        const maxButtons = 5;
-        let startPage = Math.max(1, currentPage - Math.floor(maxButtons / 2));
-        let endPage = Math.min(totalPages, startPage + maxButtons - 1);
-        
-        if (endPage - startPage < maxButtons - 1) {
-            startPage = Math.max(1, endPage - maxButtons + 1);
-        }
-        
-        if (startPage > 1) {
-            html += '<span>...</span>';
-        }
-        
-        for (let i = startPage; i <= endPage; i++) {
-            if (i === currentPage) {
-                html += `<button class="active">${i}</button>`;
-            } else {
-                html += `<button onclick="loadPageData('${sheetKey}', '${tableType}', ${i})">${i}</button>`;
-            }
-        }
-        
-        if (endPage < totalPages) {
-            html += '<span>...</span>';
-        }
-        
-        // Next
-        if (currentPage < totalPages) {
-            html += `<button onclick="loadPageData('${sheetKey}', '${tableType}', ${currentPage + 1})">Next ›</button>`;
-        } else {
-            html += `<button disabled>Next ›</button>`;
-        }
-        
-        html += '</div></div>';
+    // Different headers based on table type
+    if (tableType === 'original') {
+        tableHTML += `
+            <th>Row Number</th>
+            <th>Row ID</th>
+            <th>First Name</th>
+            <th>Birth Day</th>
+            <th>Birth Month</th>
+            <th>Birth Year</th>
+        `;
+    } else if (tableType === 'included') {
+        tableHTML += `
+            <th>Row Number</th>
+            <th>Row ID</th>
+            <th>Name</th>
+            <th>Birth Day</th>
+            <th>Birth Month</th>
+            <th>Birth Year</th>
+        `;
+    } else if (tableType === 'excluded') {
+        tableHTML += `
+            <th>Row Number</th>
+            <th>Row ID</th>
+            <th>Original Name</th>
+            <th>Original Birth Day</th>
+            <th>Original Birth Month</th>
+            <th>Original Birth Year</th>
+            <th>Exclusion Reason</th>
+        `;
     }
     
-    html += '</div>';
-    container.innerHTML = html;
+    tableHTML += `
+                    </tr>
+                </thead>
+                <tbody>
+    `;
+    
+    // Render rows based on type
+    data.forEach(row => {
+        if (tableType === 'original') {
+            tableHTML += `
+                <tr>
+                    <td>${row.original_row_number || ''}</td>
+                    <td style="font-family: monospace; font-size: 0.85em;">${row.row_id || ''}</td>
+                    <td>${row.firstname || ''}</td>
+                    <td>${row.birthday || ''}</td>
+                    <td>${row.birthmonth || ''}</td>
+                    <td>${row.birthyear || ''}</td>
+                </tr>
+            `;
+        } else if (tableType === 'included') {
+            tableHTML += `
+                <tr>
+                    <td>${row.original_row_number || ''}</td>
+                    <td style="font-family: monospace; font-size: 0.85em;">${row.row_id || ''}</td>
+                    <td>${row.name || ''}</td>
+                    <td>${row.birth_day || ''}</td>
+                    <td>${row.birth_month || ''}</td>
+                    <td>${row.birth_year || ''}</td>
+                </tr>
+            `;
+        } else if (tableType === 'excluded') {
+            tableHTML += `
+                <tr>
+                    <td>${row.original_row_number || ''}</td>
+                    <td style="font-family: monospace; font-size: 0.85em;">${row.row_id || ''}</td>
+                    <td>${row.original_name || ''}</td>
+                    <td>${row.original_birth_day || ''}</td>
+                    <td>${row.original_birth_month || ''}</td>
+                    <td>${row.original_birth_year || ''}</td>
+                    <td>${row.exclusion_reason || ''}</td>
+                </tr>
+            `;
+        }
+    });
+    
+    tableHTML += `
+                </tbody>
+            </table>
+        </div>
+        <div class="pagination">
+    `;
+    
+    // Different pagination functions based on type
+    if (tableType === 'original') {
+        tableHTML += `
+            <button onclick="loadOriginalData('${sheetKey}', ${currentPage - 1})" 
+                    ${currentPage === 1 ? 'disabled' : ''}>
+                Previous
+            </button>
+            <span>Page ${currentPage} of ${totalPages} (${totalRecords.toLocaleString()} total records)</span>
+            <button onclick="loadOriginalData('${sheetKey}', ${currentPage + 1})" 
+                    ${currentPage === totalPages ? 'disabled' : ''}>
+                Next
+            </button>
+        `;
+    } else if (tableType === 'included') {
+        tableHTML += `
+            <button onclick="loadCleanedData('${sheetKey}', 'included', ${currentPage - 1})" 
+                    ${currentPage === 1 ? 'disabled' : ''}>
+                Previous
+            </button>
+            <span>Page ${currentPage} of ${totalPages} (${totalRecords.toLocaleString()} total records)</span>
+            <button onclick="loadCleanedData('${sheetKey}', 'included', ${currentPage + 1})" 
+                    ${currentPage === totalPages ? 'disabled' : ''}>
+                Next
+            </button>
+        `;
+    } else if (tableType === 'excluded') {
+        tableHTML += `
+            <button onclick="loadCleanedData('${sheetKey}', 'excluded', ${currentPage - 1})" 
+                    ${currentPage === 1 ? 'disabled' : ''}>
+                Previous
+            </button>
+            <span>Page ${currentPage} of ${totalPages} (${totalRecords.toLocaleString()} total records)</span>
+            <button onclick="loadCleanedData('${sheetKey}', 'excluded', ${currentPage + 1})" 
+                    ${currentPage === totalPages ? 'disabled' : ''}>
+                Next
+            </button>
+        `;
+    }
+    
+    tableHTML += `
+        </div>
+    `;
+    
+    container.innerHTML = tableHTML;
 }
 
 function loadPageData(sheetKey, tableType, page) {

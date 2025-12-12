@@ -92,7 +92,7 @@ class DataCleaner:
         Clean and validate a single row
         
         Args:
-            row: Dictionary containing row data
+            row: Dictionary containing row data (must include row_id and original_row_number)
         
         Returns:
             Tuple of (is_valid, cleaned_row, error_messages)
@@ -100,9 +100,8 @@ class DataCleaner:
         errors = []
         cleaned = {}
         
-        # Generate unique identifier
-        row_id = str(uuid.uuid4())
-        cleaned['row_id'] = row_id
+        # Preserve row_id from input (generated during Google Sheets read)
+        cleaned['row_id'] = row.get('row_id')
         # Preserve original row number
         cleaned['original_row_number'] = row.get('original_row_number')
         
@@ -166,7 +165,7 @@ class DataCleaner:
         Clean entire dataset
         
         Args:
-            data: List of row dictionaries
+            data: List of row dictionaries (each with row_id and original_row_number)
         
         Returns:
             Tuple of (included_data, excluded_data)
@@ -203,7 +202,7 @@ class DataCleaner:
                 }
                 self.excluded_data.append(excluded_row)
             
-            if (idx + 1) % 1000 == 0:
+            if (idx + 1) % 10000 == 0:
                 logger.info(f"Processed {idx + 1} rows...")
         
         logger.info(f"Cleaning complete: {len(self.included_data)} included, {len(self.excluded_data)} excluded")
